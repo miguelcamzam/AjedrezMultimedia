@@ -1,0 +1,1759 @@
+[Folder] ajedrez
+  [File] MainActivity.kt
+    [Content]:
+      package com.example.ajedrez
+
+import android.os.Bundle
+import android.util.Log
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.compose.rememberNavController
+import com.example.ajedrez.navigation.NavGraph
+import com.example.ajedrez.theme.AjedrezTheme
+import com.example.ajedrez.viewmodels.GameViewModel
+import org.opencv.android.OpenCVLoader
+
+class MainActivity : ComponentActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        // Inicializar OpenCV
+        val openCVSuccess = initializeOpenCV()
+
+        // Establecer el contenido de la aplicación si OpenCV se inicializa correctamente
+        if (openCVSuccess) {
+            setContent {
+                AjedrezTheme {
+                    val navController = rememberNavController()
+
+                    // Obtener instancia del ViewModel para gestionar el estado del juego
+                    val gameViewModel: GameViewModel = viewModel()
+
+                    // Pasar el ViewModel a NavGraph
+                    NavGraph(navController = navController, gameViewModel = gameViewModel)
+                }
+            }
+        } else {
+            // Manejar el caso si OpenCV no se carga correctamente
+            Log.e("MainActivity", "Error al inicializar OpenCV.")
+        }
+    }
+
+    // Método para inicializar OpenCV y manejar posibles errores
+    private fun initializeOpenCV(): Boolean {
+        return try {
+            val initialized = OpenCVLoader.initDebug()
+            if (initialized) {
+                Log.d("OpenCV", "OpenCV se ha inicializado correctamente.")
+            } else {
+                Log.e("OpenCV", "Error al inicializar OpenCV.")
+            }
+            initialized
+        } catch (e: Exception) {
+            Log.e("OpenCV", "Excepción al inicializar OpenCV: ${e.message}")
+            false
+        }
+    }
+}
+
+  [Folder] camera
+    [File] cameraCapture.kt
+      [Content]:
+        
+    [File] CameraPreview.kt
+      [Content]:
+        package com.example.ajedrez.camera
+
+class CameraPreview {
+}
+
+  [Folder] chess
+    [File] chessEngine.kt
+      [Content]:
+        package com.example.ajedrez.chess
+
+object ChessEngine {
+    fun getSuggestedMove(fen: String): String {
+        // Aquí se llamará al motor de ajedrez (por ejemplo, Stockfish)
+        // y se obtendrá el mejor movimiento para el estado FEN dado.
+        return "e2e4"  // Por ejemplo, un movimiento de apertura
+    }
+}
+
+    [File] ChessUtils.kt
+      [Content]:
+        package com.example.ajedrez.chess
+
+object ChessUtils {
+    fun convertBoardToFen(): String {
+        // Aquí puedes implementar la conversión de la imagen del tablero a FEN.
+        return "estado_fen_del_tablero"
+    }
+}
+
+  [Folder] game
+    [File] GameScreen.kt
+      [Content]:
+        package com.example.ajedrez.game
+
+import android.Manifest
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.provider.MediaStore
+import android.view.ViewGroup
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import com.example.ajedrez.viewmodels.GameViewModel
+import java.io.File
+import kotlinx.coroutines.delay
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.viewinterop.AndroidView
+import java.io.FileOutputStream
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import androidx.navigation.NavController
+import com.google.common.util.concurrent.ListenableFuture
+import kotlin.math.hypot
+
+enum class Turn {
+    USER,
+    RIVAL
+}
+
+@Composable
+fun GameScreen(gameViewModel: GameViewModel, navController: NavController) {
+    var currentTurn by remember { mutableStateOf(Turn.USER) }
+    var proposedMove by remember { mutableStateOf<String?>(null) }
+    var rivalMoveProcessed by remember { mutableStateOf(false) }
+    var isProcessing by remember { mutableStateOf(false) }
+    var showExitDialog by remember { mutableStateOf(false) }
+    var showCamera by remember { mutableStateOf(false) }
+    var capturedImageFile by remember { mutableStateOf<File?>(null) }
+    val context = LocalContext.current
+
+    val gameName = gameViewModel.gameName.observeAsState().value
+    val gameFolder = File(context.getExternalFilesDir(null), gameName ?: "default_game")
+
+    val imageCapture = remember { ImageCapture.Builder().build() }
+
+    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Permissions handling
+    val cameraPermissionGranted = remember { mutableStateOf(false) }
+
+    // Handle camera permission
+    val requestPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        cameraPermissionGranted.value = isGranted
+    }
+
+    LaunchedEffect(Unit) {
+        val permissionResult = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
+        if (permissionResult == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            cameraPermissionGranted.value = true
+        } else {
+            requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    // Utilizar Box para superponer el fondo y el contenido
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Fondo del patrón de ajedrez rotado
+        ChessBoardBackground()
+
+        if (showCamera && cameraPermissionGranted.value) {
+            // Mostrar la vista previa de la cámara
+            CameraPreview(
+                imageCapture = imageCapture,
+                cameraProviderFuture = cameraProviderFuture,
+                lifecycleOwner = lifecycleOwner,
+                modifier = Modifier.fillMaxSize()
+            )
+            // Botón para capturar la foto
+            Button(
+                onClick = {
+                    capturePhoto(context, imageCapture, gameFolder) { file ->
+                        capturedImageFile = file
+                        showCamera = false
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(16.dp)
+            ) {
+                Text("Capturar")
+            }
+        } else {
+            // Contenido principal
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                when (currentTurn) {
+                    Turn.USER -> {
+                        if (isProcessing) {
+                            Text("La IA está preparando el movimiento...")
+
+                            LaunchedEffect(Unit) {
+                                delay(2000)
+                                proposedMove = "e2-e4"
+                                isProcessing = false
+                            }
+                        } else {
+                            if (proposedMove != null) {
+                                Text("Propuesta de movimiento por la IA: $proposedMove")
+                                Spacer(modifier = Modifier.height(16.dp))
+
+                                Button(onClick = {
+                                    currentTurn = Turn.RIVAL
+                                    proposedMove = null
+                                    rivalMoveProcessed = false
+                                }) {
+                                    Text("Aceptar y continuar (Turno del Rival)")
+                                }
+                            } else {
+                                Text("Es tu turno, toma o selecciona una imagen.")
+
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Button(onClick = {
+                                    if (cameraPermissionGranted.value) {
+                                        showCamera = true
+                                    } else {
+                                        requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                    }
+                                }) {
+                                    Text("Tomar Foto")
+                                }
+
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Button(onClick = { /* Implementa la selección de imagen desde la galería si lo deseas */ }) {
+                                    Text("Seleccionar Imagen de la Galería")
+                                }
+
+                                Spacer(modifier = Modifier.height(16.dp))
+
+                                capturedImageFile?.let { file ->
+                                    val bitmap = remember {
+                                        BitmapFactory.decodeFile(file.absolutePath)
+                                    }
+                                    Image(
+                                        bitmap = bitmap.asImageBitmap(),
+                                        contentDescription = "Imagen capturada",
+                                        modifier = Modifier.size(200.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Button(onClick = {
+                                    isProcessing = true
+                                }) {
+                                    Text("Aceptar y procesar mi jugada")
+                                }
+                            }
+                        }
+                    }
+
+                    Turn.RIVAL -> {
+                        if (isProcessing) {
+                            Text("Procesando el movimiento del rival...")
+
+                            LaunchedEffect(Unit) {
+                                delay(2000)
+                                proposedMove = "e7-e5"
+                                isProcessing = false
+                            }
+                        } else if (rivalMoveProcessed) {
+                            Text("La IA ha procesado el movimiento del rival.")
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            Button(onClick = {
+                                currentTurn = Turn.USER
+                                rivalMoveProcessed = false
+                            }) {
+                                Text("Aceptar y continuar (Tu turno)")
+                            }
+                        } else {
+                            Text("Es el turno del rival. Toma o selecciona una imagen.")
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            Button(onClick = {
+                                if (cameraPermissionGranted.value) {
+                                    showCamera = true
+                                } else {
+                                    requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                }
+                            }) {
+                                Text("Tomar Foto del Movimiento del Rival")
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Button(onClick = { /* Implementa la selección de imagen desde la galería si lo deseas */ }) {
+                                Text("Seleccionar Imagen del Movimiento del Rival")
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            capturedImageFile?.let { file ->
+                                val bitmap = remember {
+                                    BitmapFactory.decodeFile(file.absolutePath)
+                                }
+                                Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = "Imagen capturada",
+                                    modifier = Modifier.size(200.dp)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Button(onClick = {
+                                isProcessing = true
+                                rivalMoveProcessed = true
+                            }) {
+                                Text("Aceptar y procesar movimiento del rival")
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                Button(onClick = { showExitDialog = true }) {
+                    Text("Salir de la Partida")
+                }
+            }
+
+            // Cuadro de diálogo para confirmar salida
+            if (showExitDialog) {
+                ExitGameDialog(
+                    onDismiss = { showExitDialog = false },
+                onConfirmSave = {
+                    // Usuario elige guardar
+                    showExitDialog = false
+                    Toast.makeText(context, "Partida guardada.", Toast.LENGTH_SHORT).show()
+                    navController.navigate("main") {
+                        popUpTo("main") { inclusive = true }
+                    }
+                },
+                onConfirmDiscard = {
+                    // Usuario elige no guardar, eliminar carpeta
+                    deleteGameFolder(gameFolder)
+                    showExitDialog = false
+                    Toast.makeText(context, "No se ha guardado la partida.", Toast.LENGTH_SHORT).show()
+                    navController.navigate("main") {
+                        popUpTo("main") { inclusive = true }
+                    }
+                }
+                )
+            }
+        }
+    }
+}
+
+
+// Función para eliminar la carpeta de la partida
+fun deleteGameFolder(gameFolder: File) {
+    if (gameFolder.exists()) {
+        gameFolder.deleteRecursively()
+    }
+}
+
+// Composable personalizado para el diálogo de salida
+@Composable
+fun ExitGameDialog(
+    onDismiss: () -> Unit,
+    onConfirmSave: () -> Unit,
+    onConfirmDiscard: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = { onDismiss() },
+        properties = DialogProperties(dismissOnClickOutside = false)
+    ) {
+        Surface(
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 8.dp
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp)
+            ) {
+                Text("Salir de la partida", style = MaterialTheme.typography.titleLarge)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("¿Deseas guardar la partida antes de salir?")
+                Spacer(modifier = Modifier.height(24.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text("Cancelar")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    TextButton(onClick = onConfirmDiscard) {
+                        Text("No guardar")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    TextButton(onClick = onConfirmSave) {
+                        Text("Guardar")
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun capturePhoto(
+    context: Context,
+    imageCapture: ImageCapture,
+    gameFolder: File,
+    onPhotoCaptured: (File) -> Unit
+) {
+    val file = File(gameFolder, "captured_${System.currentTimeMillis()}.jpg")
+    val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
+
+    imageCapture.takePicture(
+        outputOptions,
+        ContextCompat.getMainExecutor(context),
+        object : ImageCapture.OnImageSavedCallback {
+            override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                // Comprimir la imagen después de guardarla
+                compressImage(file)
+                onPhotoCaptured(file) // Notificar que la foto se ha capturado
+            }
+
+            override fun onError(exception: ImageCaptureException) {
+                Toast.makeText(context, "Error al capturar la foto: ${exception.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    )
+}
+
+// Función para comprimir una imagen
+fun compressImage(file: File) {
+    try {
+        val originalBitmap = BitmapFactory.decodeFile(file.absolutePath)
+        val outputStream = FileOutputStream(file)
+
+        // Comprimir y sobrescribir el archivo existente
+        originalBitmap.compress(Bitmap.CompressFormat.JPEG, 80, outputStream)
+
+        outputStream.flush()
+        outputStream.close()
+        originalBitmap.recycle() // Liberar memoria
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+}
+
+
+
+
+@Composable
+fun CameraPreview(
+    modifier: Modifier = Modifier,
+    imageCapture: ImageCapture,
+    lifecycleOwner: LifecycleOwner,
+    cameraProviderFuture: ListenableFuture<ProcessCameraProvider>
+) {
+    AndroidView(
+        modifier = modifier,
+        factory = { context ->
+            val previewView = PreviewView(context).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+
+            // Configurar la cámara
+            cameraProviderFuture.addListener({
+                val cameraProvider = cameraProviderFuture.get()
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+
+                try {
+                    cameraProvider.unbindAll()
+
+                    // Vincular la cámara con el ciclo de vida
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
+                        preview,
+                        imageCapture
+                    )
+                } catch (exc: Exception) {
+                    exc.printStackTrace()
+                }
+            }, ContextCompat.getMainExecutor(context))
+
+            previewView
+        }
+    )
+}
+
+
+@Composable
+fun ChessBoardBackground(modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier.fillMaxSize()) {
+        drawRotatedChessPattern()
+    }
+}
+
+fun DrawScope.drawRotatedChessPattern() {
+    // Definir los colores del patrón
+    val lightColor = Color(0xFFF0D9B5)
+    val darkColor = Color(0xFFB58863)
+
+    // Rotar el canvas
+    val rotationAngle = 30f  // Ajusta este valor para cambiar el ángulo de rotación
+    rotate(rotationAngle) {
+        // Calcular el tamaño de las celdas
+        val cellSize = size.minDimension / 8f  // Ajusta este valor para cambiar el tamaño de las celdas
+
+        // Calcular el número de celdas necesarias para cubrir la pantalla
+        val diagonal = hypot(size.width, size.height)
+        val numCellsX = (diagonal / cellSize).toInt() + 1
+        val numCellsY = (diagonal / cellSize).toInt() + 1
+
+        // Dibujar el patrón de cuadrados
+        for (i in -numCellsX..numCellsX) {
+            for (j in -numCellsY..numCellsY) {
+                val color = if ((i + j) % 2 == 0) lightColor else darkColor
+                drawRect(
+                    color = color,
+                    topLeft = Offset(i * cellSize, j * cellSize),
+                    size = Size(cellSize, cellSize)
+                )
+            }
+        }
+    }
+}
+
+    [File] NameGameScreen.kt
+      [Content]:
+        package com.example.ajedrez.game
+
+import android.content.Context
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.example.ajedrez.viewmodels.GameViewModel
+import android.widget.Toast
+import androidx.compose.ui.graphics.Color
+import java.io.File
+import androidx.compose.ui.platform.LocalContext
+
+@Composable
+fun NameGameScreen(onGameNameEntered: () -> Unit, gameViewModel: GameViewModel) {
+    var gameName by remember { mutableStateOf("") }
+    val context = LocalContext.current
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        ChessBoardBackground()
+        // Opcional: Surface semitransparente para mejorar la legibilidad
+        Surface(
+            color = Color.Black.copy(alpha = 0.5f),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(text = "Introduce el nombre de la partida")
+                Spacer(modifier = Modifier.height(16.dp))
+                TextField(
+                    value = gameName,
+                    onValueChange = { gameName = it },
+                    label = { Text("Nombre de la partida") }
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(onClick = {
+                    if (gameName.isNotBlank()) {
+                        val gameFolder = File(context.getExternalFilesDir(null), gameName)
+
+                        if (!gameFolder.exists()) {
+                            val created = gameFolder.mkdirs()
+                            if (created) {
+                                Toast.makeText(context, "Carpeta creada: ${gameFolder.absolutePath}", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Error al crear la carpeta.", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                        }
+
+                        // Llamar a enforceMaxSavedGames aquí
+                        enforceMaxSavedGames(context, maxGames = 5)
+
+                        gameViewModel.setGameName(gameName)
+                        onGameNameEntered()  // Navegar a la siguiente pantalla
+                    } else {
+                        Toast.makeText(context, "El nombre de la partida no puede estar vacío.", Toast.LENGTH_SHORT).show()
+                    }
+                }) {
+                    Text("Confirmar nombre")
+                }
+            }
+        }
+    }
+}
+
+// Función para eliminar las partidas más antiguas y mantener solo las últimas 5
+fun enforceMaxSavedGames(context: Context, maxGames: Int) {
+    val baseDir = context.getExternalFilesDir(null)
+    val gameFolders = baseDir?.listFiles()?.filter { it.isDirectory }
+
+    if (gameFolders != null && gameFolders.size > maxGames) {
+        val sortedGameFolders = gameFolders.sortedBy { it.lastModified() }
+        val foldersToDelete = sortedGameFolders.take(gameFolders.size - maxGames)
+
+        for (folder in foldersToDelete) {
+            folder.deleteRecursively()
+        }
+    }
+}
+
+    [File] SelectStarterterScreen.kt
+      [Content]:
+        package com.example.ajedrez.game
+
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.example.ajedrez.userInterface.ChessBoardBackground
+import com.example.ajedrez.viewmodels.GameViewModel
+
+@Composable
+fun SelectStarterScreen(
+    onRivalStarts: () -> Unit,  // Cuando empieza el rival
+    onUserStarts: () -> Unit,   // Cuando empieza el usuario
+    gameViewModel: GameViewModel  // Asegúrate de tener este parámetro
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        ChessBoardBackground()
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text("¿Quién empieza la partida?")
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Button(onClick = {
+                gameViewModel.setPlayerStartsFirst(false)  // Rival empieza
+                onRivalStarts()  // Navegar a la pantalla de batalla
+            }) {
+                Text("Empieza mi rival")
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Button(onClick = {
+                gameViewModel.setPlayerStartsFirst(true)  // Usuario empieza
+                onUserStarts()  // Navegar a la pantalla de batalla
+            }) {
+                Text("Empiezo yo")
+            }
+        }
+    }
+}
+
+  [Folder] navigation
+    [File] NavGraph.kt
+      [Content]:
+        package com.example.ajedrez.navigation
+
+import androidx.compose.runtime.Composable
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import com.example.ajedrez.userInterface.MainScreen
+import com.example.ajedrez.userInterface.LearnScreen
+import com.example.ajedrez.game.GameScreen
+import com.example.ajedrez.userInterface.IntermediateScreen
+import com.example.ajedrez.userInterface.AdvancedScreen
+import com.example.ajedrez.game.NameGameScreen
+import com.example.ajedrez.game.SelectStarterScreen
+import com.example.ajedrez.viewmodels.GameViewModel
+import androidx.compose.ui.platform.LocalContext
+import com.example.ajedrez.userInterface.GameImagesScreen
+import com.example.ajedrez.userInterface.SavedGamesScreen
+import java.io.File
+import com.example.ajedrez.userInterface.ImportedGameScreen
+import com.example.ajedrez.userInterface.ImageViewerScreen
+import com.example.ajedrez.userInterface.NativePdfViewer
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
+
+
+@Composable
+fun NavGraph(navController: NavHostController, gameViewModel: GameViewModel) {
+    NavHost(navController = navController, startDestination = "main") {
+
+        // Pantalla principal con las opciones "Bate a tu rival" y "Aprende a jugar"
+        composable("main") {
+            MainScreen(
+                onNavigateToLearn = { navController.navigate("learn") },
+                onNavigateToBattle = { navController.navigate("nameGame") },
+                onNavigateToSavedGames = { navController.navigate("savedGames") } // NUEVO CÓDIGO
+            )
+        }
+
+        // Pantalla de "Aprende a jugar" con las opciones de niveles
+        composable("learn") {
+            LearnScreen(
+                onNavigateToIntermediate = { navController.navigate("intermediate") },
+                onNavigateToAdvanced = { navController.navigate("advanced") },
+                onNavigateToPDF = { navController.navigate("pdf") }  // Para ver un PDF (principiante)
+            )
+        }
+
+        // Pantalla para introducir el nombre de la partida
+        composable("nameGame") {
+            NameGameScreen(
+                onGameNameEntered = { navController.navigate("selectStarter") },
+                gameViewModel = gameViewModel
+            )
+        }
+
+        // Pantalla para seleccionar quién empieza la partida
+        composable("selectStarter") {
+            SelectStarterScreen(
+                onRivalStarts = { navController.navigate("battle") },  // Cuando el rival empieza, navega al juego
+                onUserStarts = { navController.navigate("battle") },   // Cuando el usuario empieza, navega al juego
+                gameViewModel = gameViewModel
+            )
+        }
+
+        composable("imageViewer/{imageUriString}") { backStackEntry ->
+            val encodedUri = backStackEntry.arguments?.getString("imageUriString")
+            val imageUriString = encodedUri?.let { URLDecoder.decode(it, StandardCharsets.UTF_8.toString()) }
+            imageUriString?.let {
+                ImageViewerScreen(navController = navController, imageUriString = it)
+            }
+        }
+
+        // Pantalla de juego "Bate a tu rival!"
+        composable("battle") {
+            GameScreen(gameViewModel = gameViewModel, navController = navController)
+        }
+
+        composable("savedGames") {
+            SavedGamesScreen(
+                context = LocalContext.current,
+                navController = navController,  // Pasamos el navController
+                onGameSelected = { selectedGameName ->
+                    navController.navigate("gameImages/$selectedGameName")
+                }
+            )
+        }
+        composable("gameImages/{gameName}") { backStackEntry ->
+            val gameName = backStackEntry.arguments?.getString("gameName")
+            gameName?.let {
+                GameImagesScreen(
+                    context = LocalContext.current,
+                    gameName = it,
+                    navController = navController  // Agregado navController
+                )
+            }
+        }
+
+        composable("importedGame") {
+            // Obtenemos el tempDir desde el SavedGamesScreen a través del ViewModel o NavController
+            val tempDirPath = navController.previousBackStackEntry?.savedStateHandle?.get<String>("tempDirPath")
+            tempDirPath?.let {
+                val tempDir = File(it)
+                ImportedGameScreen(navController = navController, tempDir = tempDir)
+            }
+
+        }
+        // Pantallas individuales para los niveles de aprendizaje
+        composable("intermediate") {
+            IntermediateScreen()  // Pantalla para nivel intermedio
+        }
+
+        composable("advanced") {
+            AdvancedScreen()  // Pantalla para nivel avanzado
+        }
+
+        // Visualización del PDF en el nivel principiante
+        composable("pdf") {
+            NativePdfViewer(assetFileName = "AJEDREZ-ELEMENTOS-DE-TACTICA.pdf")
+        }
+
+
+    }
+}
+
+
+  [Folder] theme
+    [File] AjedrezTheme.kt
+      [Content]:
+        package com.example.ajedrez.theme
+
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
+
+@Composable
+fun AjedrezTheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),  // Detecta el tema del sistema
+    content: @Composable () -> Unit
+) {
+    val colors = if (darkTheme) {
+        // Colores para tema oscuro
+        MaterialTheme.colorScheme.copy(
+            primary = DarkPrimary,
+            onPrimary = DarkOnPrimary,
+            background = DarkBackground
+        )
+    } else {
+        // Colores para tema claro
+        MaterialTheme.colorScheme.copy(
+            primary = LightPrimary,
+            onPrimary = LightOnPrimary,
+            background = LightBackground
+        )
+    }
+
+    MaterialTheme(
+        colorScheme = colors,
+        typography = AjedrezTypography,  // Tipografía personalizada
+        content = content
+    )
+}
+
+    [File] Color.kt
+      [Content]:
+        package com.example.ajedrez.theme
+
+import androidx.compose.ui.graphics.Color
+
+val LightPrimary = Color(0xFFBB86FC)
+val LightOnPrimary = Color(0xFFFFFFFF)
+val DarkPrimary = Color(0xFF3700B3)
+val DarkOnPrimary = Color(0xFF000000)
+
+val LightBackground = Color(0xFFF5F5F5)
+val DarkBackground = Color(0xFF121212)
+
+    [File] Type.kt
+      [Content]:
+        package com.example.ajedrez.theme
+
+import androidx.compose.material3.Typography
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+
+val AjedrezTypography = Typography(
+    bodyLarge = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Normal,
+        fontSize = 16.sp
+    )
+)
+
+  [Folder] userInterface
+    [File] AdvancedScreen.kt
+      [Content]:
+        package com.example.ajedrez.userInterface
+
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import com.example.ajedrez.theme.AjedrezTheme
+
+@Composable
+fun AdvancedScreen() {
+    val context = LocalContext.current
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        ChessBoardBackground()  // Añade el fondo aquí
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
+            Text("Estrategias Avanzadas de Ajedrez")
+
+            Text("1. Ataque Indio de Rey")
+            Button(onClick = {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/watch?v=IJPDH3CQG_k&ab_channel=SissaChess"))
+                context.startActivity(intent)
+            }) {
+                Text("Ver Video Ataque Indio de Rey")
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text("2. Gambito de Dama")
+            Button(onClick = {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/watch?v=8dEKDbi18fg&ab_channel=Chess.comES"))
+                context.startActivity(intent)
+            }) {
+                Text("Ver Video Gambito de Dama")
+            }
+        }
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+fun AdvancedScreenPreview() {
+    AjedrezTheme {
+        AdvancedScreen()
+    }
+}
+
+    [File] ChessBoardBackground.kt
+      [Content]:
+        package com.example.ajedrez.userInterface
+
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.unit.dp
+import kotlin.math.hypot
+
+@Composable
+fun ChessBoardBackground(modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier.fillMaxSize()) {
+        drawRotatedChessPattern()
+    }
+}
+
+fun DrawScope.drawRotatedChessPattern() {
+    // Definir los colores del patrón
+    val lightColor = Color(0xFFF0D9B5)
+    val darkColor = Color(0xFFB58863)
+
+    // Rotar el canvas
+    val rotationAngle = 30f  // Ajusta este valor para cambiar el ángulo de rotación
+    rotate(rotationAngle) {
+        // Calcular el tamaño de las celdas
+        val cellSize = size.minDimension / 8f  // Puedes ajustar este valor para cambiar el tamaño de las celdas
+
+        // Calcular el número de celdas necesarias para cubrir la pantalla
+        val diagonal = hypot(size.width, size.height)
+        val numCellsX = (diagonal / cellSize).toInt() + 1
+        val numCellsY = (diagonal / cellSize).toInt() + 1
+
+        // Dibujar el patrón de cuadrados
+        for (i in -numCellsX..numCellsX) {
+            for (j in -numCellsY..numCellsY) {
+                val color = if ((i + j) % 2 == 0) lightColor else darkColor
+                drawRect(
+                    color = color,
+                    topLeft = Offset(i * cellSize, j * cellSize),
+                    size = Size(cellSize, cellSize)
+                )
+            }
+        }
+    }
+}
+
+    [File] GameImagesScreen.kt
+      [Content]:
+        package com.example.ajedrez.userInterface
+
+import android.content.Context
+import android.net.Uri
+import android.provider.MediaStore
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.unit.dp
+import java.io.File
+import androidx.compose.material3.*
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.graphics.Color
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+import java.io.FileInputStream
+import androidx.navigation.NavController
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+
+
+@Composable
+fun GameImagesScreen(context: Context, gameName: String, navController: NavController) {
+    val images = remember { getGameImages(context, gameName) }
+    val coroutineScope = rememberCoroutineScope()
+    val exportResult = remember { mutableStateOf<String?>(null) }
+
+    // Launcher para el Storage Access Framework
+    val createDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        uri?.let {
+            // Iniciar la exportación en un hilo de corrutina
+            coroutineScope.launch {
+                val success = exportGameAsZip(context, gameName, it)
+                if (success) {
+                    exportResult.value = "Exportación exitosa"
+                } else {
+                    exportResult.value = "Error en la exportación"
+                }
+            }
+        }
+    }
+        ChessBoardBackground()
+        Surface(
+            color = Color.Black.copy(alpha = 0.5f),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                Button(
+                    onClick = {
+                        // Solicitar al usuario el nombre y ubicación para guardar el archivo ZIP
+                        createDocumentLauncher.launch("$gameName.zip")
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                ) {
+                    Text("Exportar partida como ZIP")
+                }
+
+                // Mostrar resultado de la exportación
+                exportResult.value?.let { resultMessage ->
+                    Text(text = resultMessage)
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+
+                LazyColumn {
+                    items(images) { imageFile ->
+                        val bitmap = remember {
+                            MediaStore.Images.Media.getBitmap(
+                                context.contentResolver,
+                                Uri.fromFile(imageFile)
+                            )
+                        }
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Imagen guardada",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(200.dp)
+                                .padding(bottom = 16.dp)
+                                .clickable {
+                                    // Navegar a ImageViewerScreen pasando la ruta de la imagen
+                                    navController.navigate(
+                                        "imageViewer/${
+                                            URLEncoder.encode(
+                                                Uri.fromFile(
+                                                    imageFile
+                                                ).toString(), StandardCharsets.UTF_8.toString()
+                                            )
+                                        }"
+                                    )
+                                }
+                        )
+                    }
+                }
+            }
+        }
+}
+
+fun getGameImages(context: Context, gameName: String): List<File> {
+    val gameDir = File(context.getExternalFilesDir(null), gameName)
+    return gameDir.listFiles()?.filter { it.extension.lowercase() in listOf("jpg", "jpeg", "png") } ?: emptyList()
+}
+
+suspend fun exportGameAsZip(context: Context, gameName: String, destinationUri: Uri): Boolean {
+    return withContext(Dispatchers.IO) {
+        try {
+            val gameDir = File(context.getExternalFilesDir(null), gameName)
+            if (!gameDir.exists() || !gameDir.isDirectory) {
+                return@withContext false
+            }
+
+            // Obtener el OutputStream del URI proporcionado por el usuario
+            context.contentResolver.openOutputStream(destinationUri)?.use { outputStream ->
+                ZipOutputStream(outputStream).use { zipOut ->
+                    zipFolder(gameDir, gameDir.name, zipOut)
+                }
+            } ?: return@withContext false
+
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+}
+
+// Función para comprimir una carpeta en el ZipOutputStream
+fun zipFolder(folder: File, parentFolderName: String, zipOut: ZipOutputStream) {
+    val files = folder.listFiles()
+    for (file in files) {
+        if (file.isDirectory) {
+            zipFolder(file, "$parentFolderName/${file.name}", zipOut)
+        } else {
+            FileInputStream(file).use { fis ->
+                val zipEntry = ZipEntry("$parentFolderName/${file.name}")
+                zipOut.putNextEntry(zipEntry)
+                fis.copyTo(zipOut)
+                zipOut.closeEntry()
+            }
+        }
+    }
+}
+
+    [File] ImageViewerScreen.kt
+      [Content]:
+        package com.example.ajedrez.userInterface
+
+import android.net.Uri
+import android.provider.MediaStore
+import androidx.compose.foundation.gestures.*
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.Image
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.navigation.NavController
+
+@Composable
+fun ImageViewerScreen(navController: NavController, imageUriString: String) {
+    val context = LocalContext.current
+    val imageUri = Uri.parse(imageUriString)
+    val bitmap = remember {
+        MediaStore.Images.Media.getBitmap(context.contentResolver, imageUri)
+    }
+
+    // Variables para el zoom y desplazamiento
+    var scale by remember { mutableStateOf(1f) }
+    var offsetX by remember { mutableStateOf(0f) }
+    var offsetY by remember { mutableStateOf(0f) }
+
+    // Estado para el gesto transformable
+    val state = rememberTransformableState { zoomChange, offsetChange, rotationChange ->
+        scale *= zoomChange
+        offsetX += offsetChange.x
+        offsetY += offsetChange.y
+        // No necesitamos rotación en este caso
+    }
+
+    // Envolver todo en un Box para superponer elementos
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Fondo del tablero de ajedrez
+        ChessBoardBackground()
+
+        // Superficie semitransparente
+        Surface(
+            color = Color.Black.copy(alpha = 0.5f),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            // Contenido principal con imagen ampliable
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+                    .transformable(state = state)
+            ) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "Imagen ampliable",
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offsetX,
+                            translationY = offsetY
+                        )
+                )
+            }
+        }
+    }
+}
+
+    [File] ImportatedGameScreen.kt
+      [Content]:
+        package com.example.ajedrez.userInterface
+
+import android.content.Context
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.Color
+import androidx.navigation.NavController
+import androidx.navigation.NavBackStackEntry
+import androidx.compose.ui.platform.LocalContext
+import java.io.File
+import android.net.Uri
+import android.provider.MediaStore
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+
+@Composable
+fun ImportedGameScreen(navController: NavController, tempDir: File) {
+    val images = remember { getImagesFromDirectory(tempDir) }
+    val context = LocalContext.current
+
+    var shouldDeleteTempDir by remember { mutableStateOf(false) }
+
+    // Manejar el botón "Atrás"
+    BackHandler {
+        // Indicar que se debe eliminar el tempDir
+        shouldDeleteTempDir = true
+        // Navegar hacia atrás
+        navController.popBackStack()
+    }
+
+    // Si se debe eliminar el tempDir, eliminarlo
+    LaunchedEffect(shouldDeleteTempDir) {
+        if (shouldDeleteTempDir) {
+            tempDir.deleteRecursively()
+        }
+    }
+
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        ChessBoardBackground()
+        Surface(
+            color = Color.Black.copy(alpha = 0.5f),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                items(images) { imageFile ->
+                    val bitmap = remember {
+                        MediaStore.Images.Media.getBitmap(
+                            context.contentResolver,
+                            Uri.fromFile(imageFile)
+                        )
+                    }
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "Imagen importada",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(200.dp)
+                            .padding(bottom = 16.dp)
+                            .clickable {
+                                // Navegar a ImageViewerScreen pasando la ruta de la imagen
+                                navController.navigate("imageViewer/${URLEncoder.encode(Uri.fromFile(imageFile).toString(), StandardCharsets.UTF_8.toString())}")
+                            }
+                    )
+                }
+            }
+        }
+    }
+}
+
+fun getImagesFromDirectory(directory: File): List<File> {
+    return directory.walkTopDown()
+        .filter { it.isFile && it.extension.lowercase() in listOf("jpg", "jpeg", "png") }
+        .toList()
+}
+
+
+    [File] IntermediateScreen.kt
+      [Content]:
+        package com.example.ajedrez.userInterface
+
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import com.example.ajedrez.theme.AjedrezTheme
+
+@Composable
+fun IntermediateScreen() {
+    Box(modifier = Modifier.fillMaxSize()) {
+        ChessBoardBackground()  // Fondo de ajedrez
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
+            Text("Estrategias Intermedias de Ajedrez")
+
+            // Texto sobre la Apertura Italiana
+            Text("1. Apertura Italiana")
+            // WebView que carga el video de YouTube embebido
+            EmbeddedYoutubeVideo("https://www.youtube.com/watch?v=rVYzyABmDLU")
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Texto sobre la Defensa Siciliana
+            Text("2. Defensa Siciliana")
+            // Otro WebView para cargar el video de la Defensa Siciliana
+            EmbeddedYoutubeVideo("https://www.youtube.com/watch?v=r2g5eYCOrKo")
+        }
+    }
+}
+
+// Función para integrar un video de YouTube en WebView
+@Composable
+fun EmbeddedYoutubeVideo(videoUrl: String) {
+    AndroidView(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(200.dp),  // Establecer el tamaño del video
+        factory = { context ->
+            WebView(context).apply {
+                settings.javaScriptEnabled = true
+                webViewClient = WebViewClient()
+                loadUrl(videoUrl)
+            }
+        }
+    )
+}
+
+@Preview(showBackground = true)
+@Composable
+fun IntermediateScreenPreview() {
+    AjedrezTheme {
+        IntermediateScreen()
+    }
+}
+
+    [File] LearnScreen.kt
+      [Content]:
+        package com.example.ajedrez.userInterface
+
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+
+@Composable
+fun LearnScreen(onNavigateToIntermediate: () -> Unit, onNavigateToAdvanced: () -> Unit, onNavigateToPDF: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        ChessBoardBackground() // Fondo del tablero de ajedrez
+
+        // Contenido de la pantalla
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center, // Centrar los botones verticalmente
+            modifier = Modifier.fillMaxSize().padding(16.dp)
+        ) {
+            Button(onClick = onNavigateToPDF, modifier = Modifier.padding(8.dp)) {
+                Text(text = "Principiante")
+            }
+            Button(onClick = onNavigateToIntermediate, modifier = Modifier.padding(8.dp)) {
+                Text(text = "Intermedio")
+            }
+            Button(onClick = onNavigateToAdvanced, modifier = Modifier.padding(8.dp)) {
+                Text(text = "Avanzado")
+            }
+        }
+    }
+}
+
+    [File] MainScreen.kt
+      [Content]:
+        package com.example.ajedrez.userInterface
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+
+@Composable
+fun MainScreen(
+    onNavigateToLearn: () -> Unit,
+    onNavigateToBattle: () -> Unit,
+    onNavigateToSavedGames: () -> Unit
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        ChessBoardBackground() // Nuevo fondo
+
+        // Ajusta la opacidad o comenta este Box
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.White.copy(alpha = 0.3f)) // Reduce la opacidad
+        )
+
+        // Contenido de la pantalla
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.fillMaxSize().padding(16.dp)
+        ) {
+            Button(onClick = onNavigateToBattle, modifier = Modifier.padding(8.dp)) {
+                Text(text = "¡Bate a tu rival!")
+            }
+            Button(onClick = onNavigateToLearn, modifier = Modifier.padding(8.dp)) {
+                Text(text = "¡Aprende a jugar!")
+            }
+            Button(onClick = onNavigateToSavedGames, modifier = Modifier.padding(8.dp)) {
+                Text(text = "Ver partidas guardadas")
+            }
+        }
+    }
+}
+
+    [File] NativePdfViewer.kt
+      [Content]:
+        package com.example.ajedrez.userInterface
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import java.io.File
+
+fun copyPdfFromAssetsToInternalStorage(context: Context, assetFileName: String): File {
+    val file = File(context.filesDir, assetFileName)
+    if (!file.exists()) {
+        context.assets.open(assetFileName).use { inputStream ->
+            file.outputStream().use { outputStream ->
+                inputStream.copyTo(outputStream)
+            }
+        }
+    }
+    return file
+}
+
+@Composable
+fun NativePdfViewer(
+    assetFileName: String,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val file = remember { copyPdfFromAssetsToInternalStorage(context, assetFileName) }
+    var pageCount by remember { mutableStateOf(0) }
+    var currentPage by remember { mutableStateOf(0) }
+    val bitmap = remember { mutableStateOf<Bitmap?>(null) }
+
+    // Renderizar la página actual del PDF
+    LaunchedEffect(currentPage) {
+        val renderer = PdfRenderer(ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY))
+        renderer.use {
+            pageCount = it.pageCount
+            val page = it.openPage(currentPage)
+            val tempBitmap = Bitmap.createBitmap(page.width, page.height, Bitmap.Config.ARGB_8888)
+            page.render(tempBitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            page.close()
+            bitmap.value = tempBitmap
+        }
+    }
+
+    Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
+        // Mostrar la página del PDF
+        bitmap.value?.let { bmp ->
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(400.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Controles de navegación de página
+        Row(
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Button(onClick = { if (currentPage > 0) currentPage-- }) {
+                Text("Anterior")
+            }
+            Text("Página ${currentPage + 1} de $pageCount")
+            Button(onClick = { if (currentPage < pageCount - 1) currentPage++ }) {
+                Text("Siguiente")
+            }
+        }
+    }
+}
+
+    [File] SavedGamesScreen.kt
+      [Content]:
+        package com.example.ajedrez.userInterface
+
+import android.content.Context
+import android.net.Uri
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import java.io.File
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.graphics.Color
+import androidx.navigation.NavController
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.BufferedInputStream
+import java.io.FileNotFoundException
+import java.io.FileOutputStream
+import java.io.InputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import kotlinx.coroutines.Dispatchers
+
+@Composable
+fun SavedGamesScreen(context: Context, navController: NavController, onGameSelected: (String) -> Unit) {
+    val savedGames = remember { getSavedGames(context) }
+    val coroutineScope = rememberCoroutineScope()
+    var importedGameTempDir by remember { mutableStateOf<File?>(null) }
+
+    // Launcher para seleccionar un archivo ZIP
+    val importZipLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let {
+            coroutineScope.launch {
+                val tempDir = importZipFile(context, it)
+                if (tempDir != null) {
+                    importedGameTempDir = tempDir
+                    // Guardar tempDir en savedStateHandle
+                    navController.currentBackStackEntry?.savedStateHandle?.set("tempDirPath", tempDir.absolutePath)
+                    // Navegar a la pantalla que muestra las imágenes importadas
+                    navController.navigate("importedGame")
+                } else {
+                    // Manejar el error al importar el ZIP
+                }
+            }
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        ChessBoardBackground()
+        // Opcional: Surface semitransparente para mejorar la legibilidad
+        Surface(
+            color = Color.Black.copy(alpha = 0.5f),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                Button(
+                    onClick = {
+                        // Lanzar el selector de archivos para importar un ZIP
+                        importZipLauncher.launch(arrayOf("application/zip"))
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                ) {
+                    Text("Importar partida ZIP")
+                }
+
+                LazyColumn(modifier = Modifier.weight(1f)) {
+                    items(savedGames) { gameName ->
+                        Button(
+                            onClick = { onGameSelected(gameName) },
+                            modifier = Modifier.fillMaxWidth().padding(8.dp)
+                        ) {
+                            Text(text = gameName)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Función para obtener las partidas guardadas
+fun getSavedGames(context: Context): List<String> {
+    val baseDir = context.getExternalFilesDir(null)
+    val gameFolders = baseDir?.listFiles()?.filter { it.isDirectory }
+
+    return if (gameFolders != null) {
+        val sortedGameFolders = gameFolders.sortedByDescending { it.lastModified() }
+        val recentGameFolders = sortedGameFolders.take(5)
+        recentGameFolders.map { it.name }
+    } else {
+        emptyList()
+    }
+}
+
+// Función para importar y extraer el ZIP
+suspend fun importZipFile(context: Context, zipUri: Uri): File? {
+    return withContext(Dispatchers.IO) {
+        try {
+            val tempDir = File(context.cacheDir, "imported_game_${System.currentTimeMillis()}")
+            if (!tempDir.exists()) {
+                tempDir.mkdirs()
+            }
+
+            context.contentResolver.openInputStream(zipUri)?.use { inputStream ->
+                unzip(inputStream, tempDir)
+            } ?: return@withContext null
+
+            return@withContext tempDir
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+}
+
+fun unzip(zipInputStream: InputStream, targetDirectory: File) {
+    ZipInputStream(BufferedInputStream(zipInputStream)).use { zis ->
+        var ze: ZipEntry?
+        val buffer = ByteArray(1024)
+        while (zis.nextEntry.also { ze = it } != null) {
+            val file = File(targetDirectory, ze!!.name)
+            val dir = if (ze!!.isDirectory) file else file.parentFile
+            if (!dir.exists() && !dir.mkdirs()) {
+                throw FileNotFoundException("Failed to ensure directory: " + dir.absolutePath)
+            }
+            if (ze!!.isDirectory) continue
+            FileOutputStream(file).use { fout ->
+                var count: Int
+                while (zis.read(buffer).also { count = it } != -1) {
+                    fout.write(buffer, 0, count)
+                }
+            }
+        }
+    }
+}
+
+  [Folder] utils
+    [File] Turn.kt
+      [Content]:
+        package com.example.ajedrez.utils
+
+enum class Turn {
+    USER,
+    RIVAL
+}
+
+  [Folder] viewmodels
+    [File] GameViewModel.kt
+      [Content]:
+        package com.example.ajedrez.viewmodels
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.LiveData
+
+class GameViewModel : ViewModel() {
+
+    private val _gameName = MutableLiveData<String>()
+    val gameName: LiveData<String> = _gameName
+
+    private val _playerStartsFirst = MutableLiveData<Boolean>()
+    val playerStartsFirst: LiveData<Boolean> = _playerStartsFirst
+
+    fun setGameName(name: String) {
+        _gameName.value = name
+    }
+
+    fun setPlayerStartsFirst(starts: Boolean) {
+        _playerStartsFirst.value = starts
+    }
+}
+
+
